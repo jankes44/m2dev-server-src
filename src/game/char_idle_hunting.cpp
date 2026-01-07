@@ -12,8 +12,8 @@
 // Configuration
 static const DWORD MAX_DAILY_SECONDS = 28800; // 8 hours
 static const int BASE_KILLS_PER_HOUR = 100;
-static const float EXP_RATE_MODIFIER = 1.0f; // 100% of normal exp
-static const float YANG_RATE_MODIFIER = 0.5f; // 50% of normal yang
+static const float EXP_RATE_MODIFIER = 3.0f; // 300% of normal exp
+static const float YANG_RATE_MODIFIER = 1.0f; // 100% of normal yang
 
 void CHARACTER::LoadIdleHunting()
 {
@@ -21,7 +21,7 @@ void CHARACTER::LoadIdleHunting()
         return;
 
     std::unique_ptr<SQLMsg> pMsg(DBManager::instance().DirectQuery(
-        "SELECT mob_vnum, start_time, last_claim_time, total_time_today, last_reset_date, is_active, max_daily_seconds "
+        "SELECT mob_vnum, start_time, end_time, last_claim_time, total_time_today, last_reset_date, is_active, max_daily_seconds "
         "FROM idle_hunting WHERE pid = %u", 
         GetPlayerID()));
     
@@ -31,15 +31,15 @@ void CHARACTER::LoadIdleHunting()
         
         m_idleHunting.mobVnum = strtoul(row[0], nullptr, 10);
         m_idleHunting.startTime = strtoul(row[1], nullptr, 10);
-        m_idleHunting.lastClaimTime = strtoul(row[2], nullptr, 10);
-        m_idleHunting.totalTimeToday = strtoul(row[3], nullptr, 10);
-        m_idleHunting.isActive = atoi(row[5]);
-        m_idleHunting.maxDailySeconds = row[6] ? strtoul(row[6], nullptr, 10) : MAX_DAILY_SECONDS;
+        m_idleHunting.endTime = strtoul(row[2], nullptr, 10);
+        m_idleHunting.lastClaimTime = strtoul(row[3], nullptr, 10);
+        m_idleHunting.totalTimeToday = strtoul(row[4], nullptr, 10);
+        m_idleHunting.maxDailySeconds = row[7] ? strtoul(row[7], nullptr, 10) : MAX_DAILY_SECONDS;
         
-        if (row[4])
-            strncpy(m_idleHunting.lastResetDate, row[4], sizeof(m_idleHunting.lastResetDate) - 1);
+        if (row[5])
+            strncpy(m_idleHunting.lastResetDate, row[5], sizeof(m_idleHunting.lastResetDate) - 1);
         
-        m_idleHunting.isActive = atoi(row[5]);
+        m_idleHunting.isActive = atoi(row[6]);
         
         // If hunt was active (is_active=1), player logged back in, set to "ready to claim" state
         if (m_idleHunting.isActive == 1)
@@ -56,6 +56,7 @@ void CHARACTER::LoadIdleHunting()
             
             // Mark as ready to claim (state 2)
             m_idleHunting.isActive = 2;
+            m_idleHunting.endTime = static_cast<DWORD>(time(0)); // Freeze hunt end time
             SaveIdleHunting();
             
             sys_log(0, "IDLE_HUNT: Player %u logged in with active hunt, marked as ready to claim", GetPlayerID());
@@ -136,6 +137,7 @@ void CHARACTER::StartIdleHunting(DWORD mobVnum)
     // Set to pending state - hunt won't start until player logs out
     m_idleHunting.mobVnum = mobVnum;
     m_idleHunting.startTime = 0; // Will be set on logout
+    m_idleHunting.endTime = 0;
     m_idleHunting.lastClaimTime = 0;
     m_idleHunting.isActive = 0; // Pending state - not active yet
     strncpy(m_idleHunting.lastResetDate, currentDate, sizeof(m_idleHunting.lastResetDate) - 1);
@@ -164,6 +166,7 @@ void CHARACTER::StopIdleHunting()
     m_idleHunting.mobVnum = 0;
     m_idleHunting.isActive = 0;
     m_idleHunting.startTime = 0;
+    m_idleHunting.endTime = 0;
     m_idleHunting.lastClaimTime = 0;
     ChatPacket(CHAT_TYPE_INFO, "Idle hunting has been cancelled.");
     
@@ -242,10 +245,66 @@ void CHARACTER::CalculateIdleRewards()
         return;
     }
     
-    // Calculate efficiency based on level difference
-    int levelDiff = GetLevel() - mobData->m_table.bLevel;
+        // Get player combat stats
+    int playerLevel = GetLevel();
+    int playerAttGrade = GetPoint(POINT_ATT_GRADE);
+    int playerAtkSpeed = GetPoint(POINT_ATT_SPEED);
+
+    // Get equipped weapon for realistic damage calculation
+    LPITEM pWeapon = GetWear(WEAR_WEAPON);
+    int weaponDamageMin = 0;
+    int weaponDamageMax = 0;
+
+    if (pWeapon && pWeapon->GetType() == ITEM_WEAPON)
+    {
+        weaponDamageMin = pWeapon->GetValue(3); // Weapon min damage
+        weaponDamageMax = pWeapon->GetValue(4); // Weapon max damage
+    }
+
+    // Get mob stats  
+    int mobLevel = mobData->m_table.bLevel;
+    DWORD mobHP = mobData->m_table.dwMaxHP;
+    int mobDefGrade = mobData->m_table.wDef;
+
+    // Calculate base weapon damage (average of min/max, multiplied by 2 like in CalcMeleeDamage)
+    int weaponDamage = ((weaponDamageMin + weaponDamageMax) / 2) * 2;
+
+    // Simplified attack calculation based on CalcMeleeDamage formula
+    // Real formula: iAtk = (ATT_GRADE + weaponDam - Level*2) * AR + Level*2
+    // For idle hunting, we use average attack rating ~0.8
+    float attackRating = 1.0f; 
+    int baseAttack = playerAttGrade + weaponDamage - (playerLevel * 2);
+    int totalAttack = (int)(baseAttack * attackRating) + (playerLevel * 2);
+
+    // Defense calculation (simplified)
+    int totalDefense = mobDefGrade;
+
+    // Effective damage per hit
+    int effectiveDamage = MAX(1, totalAttack - totalDefense);
+
+    // Calculate hits needed to kill
+    float hitsToKill = (float)mobHP / (float)effectiveDamage;
+
+    // Calculate attack speed factor (100 = normal, 120 = 20% faster)
+    float attackSpeedFactor = playerAtkSpeed / 100.0f;
+    if (attackSpeedFactor < 0.5f) attackSpeedFactor = 0.5f; // Min 50% speed
+
+    // Base time per attack: ~2 seconds, modified by attack speed
+    float secondsPerHit = 2.0f / attackSpeedFactor;
+
+    // Time to kill one mob (combat time)
+    float combatTime = hitsToKill * secondsPerHit;
+
+    // Add movement/preparation time (~4 seconds between mobs)
+    float totalTimePerKill = combatTime + 4.0f;
+
+    // Calculate kills per hour
+    float killsPerHour = 3600.0f / totalTimePerKill;
+
+    // Apply level difference efficiency penalty
+    int levelDiff = playerLevel - mobLevel;
     float efficiencyRate = 1.0f;
-    
+
     if (levelDiff > 10)
         efficiencyRate = 0.1f; // 90% penalty if 10+ levels above
     else if (levelDiff > 5)
@@ -254,11 +313,17 @@ void CHARACTER::CalculateIdleRewards()
         efficiencyRate = 0.2f; // 80% penalty if 10+ levels below
     else if (levelDiff < -5)
         efficiencyRate = 0.4f; // 60% penalty if 5-10 levels below
-    
-    // Calculate kills
-    float actualKillsPerHour = BASE_KILLS_PER_HOUR * efficiencyRate;
-    int totalKills = static_cast<int>((elapsedSeconds / 3600.0f) * actualKillsPerHour);
-    
+
+    killsPerHour *= efficiencyRate;
+
+    // Sanity caps
+    if (killsPerHour < 10.0f) 
+        killsPerHour = 10.0f;   // Minimum 10/hour
+    if (killsPerHour > 500.0f) 
+        killsPerHour = 500.0f;  // Maximum 500/hour
+
+    int totalKills = static_cast<int>((elapsedSeconds / 3600.0f) * killsPerHour);
+
     // Sanity check on kills
     if (totalKills < 0)
         totalKills = 0;
@@ -268,9 +333,19 @@ void CHARACTER::CalculateIdleRewards()
         totalKills = 10000;
     }
     
-    // Calculate EXP
+    // Calculate EXP with level-based bonus
     QWORD expPerKill = mobData->m_table.dwExp;
-    QWORD totalExp = static_cast<QWORD>(totalKills * expPerKill * EXP_RATE_MODIFIER);
+    
+    // Level-based exp multiplier for idle hunting
+    float levelExpMultiplier = EXP_RATE_MODIFIER;
+    if (playerLevel <= 10)
+        levelExpMultiplier *= 5.0f; // 5x bonus for levels 1-10
+    else if (playerLevel <= 30)
+        levelExpMultiplier *= 3.0f; // 3x bonus for levels 11-30
+    else if (playerLevel <= 50)
+        levelExpMultiplier *= 2.0f; // 2x bonus for levels 31-50
+    
+    QWORD totalExp = static_cast<QWORD>(totalKills * expPerKill * levelExpMultiplier);
     
     // Cap total exp
     if (totalExp > 2000000000) // 2 billion cap
@@ -452,11 +527,12 @@ void CHARACTER::SaveIdleHunting()
     char szQuery[512];
     snprintf(szQuery, sizeof(szQuery),
         "REPLACE INTO player.idle_hunting "
-        "(pid, mob_vnum, start_time, last_claim_time, total_time_today, last_reset_date, is_active, max_daily_seconds) "
-        "VALUES(%u, %u, %u, %u, %u, '%s', %d, %u)", 
+        "(pid, mob_vnum, start_time, end_time, last_claim_time, total_time_today, last_reset_date, is_active, max_daily_seconds) "
+        "VALUES(%u, %u, %u, %u, %u, %u, '%s', %d, %u)", 
         GetPlayerID(), 
         m_idleHunting.mobVnum, 
-        m_idleHunting.startTime, 
+        m_idleHunting.startTime,
+        m_idleHunting.endTime,
         m_idleHunting.lastClaimTime,
         m_idleHunting.totalTimeToday,
         m_idleHunting.lastResetDate,
@@ -466,4 +542,27 @@ void CHARACTER::SaveIdleHunting()
     
     sys_log(0, "IDLE_HUNT_SAVE player=%u query=%s", GetPlayerID(), szQuery);
     DBManager::instance().Query(szQuery);
+}
+
+DWORD CHARACTER::GetIdleHuntingDuration() const
+{
+    if (!IsPC() || m_idleHunting.isActive != 2)
+        return 0;
+    
+    DWORD endTime = m_idleHunting.endTime;
+    
+    if (endTime == 0 || endTime < m_idleHunting.startTime)
+        return 0;
+    
+    DWORD elapsedSeconds = endTime - m_idleHunting.startTime;
+    
+    // Same caps as in CalculateIdleRewards
+    if (elapsedSeconds > 86400)
+        elapsedSeconds = 86400;
+    
+    DWORD remainingTime = m_idleHunting.maxDailySeconds - m_idleHunting.totalTimeToday;
+    if (elapsedSeconds > remainingTime)
+        elapsedSeconds = remainingTime;
+    
+    return elapsedSeconds;
 }

@@ -2856,7 +2856,7 @@ teleport_area:
 			return 1;
 		}
 		
-		const DWORD MAX_DAILY_SECONDS = 28800;
+		const DWORD MAX_DAILY_SECONDS = ch->GetIdleHuntingMaxDaily();
 		DWORD remaining = MAX_DAILY_SECONDS - ch->GetIdleHuntingTimeToday();
 		
 		lua_pushnumber(L, remaining);
@@ -2977,6 +2977,19 @@ teleport_area:
 		ch->ChatPacket(CHAT_TYPE_INFO, "Added %d hours to idle hunting limit! New limit: %d hours per day.", hoursAdded, totalHours);
 		
 		lua_pushboolean(L, true);
+		return 1;
+	}
+
+	int pc_get_idle_hunting_duration(lua_State* L)
+	{
+		LPCHARACTER ch = CQuestManager::instance().GetCurrentCharacterPtr();
+		if (!ch)
+		{
+			lua_pushnumber(L, 0);
+			return 1;
+		}
+		
+		lua_pushnumber(L, ch->GetIdleHuntingDuration());
 		return 1;
 	}
 
@@ -3219,6 +3232,7 @@ teleport_area:
 			{ "get_idle_hunting_max_time",	pc_get_idle_hunting_max_time	},
 			{ "set_idle_hunting_max_time",	pc_set_idle_hunting_max_time	},
 			{ "add_idle_hunting_time",		pc_add_idle_hunting_time	},
+			{ "get_idle_hunting_duration", pc_get_idle_hunting_duration },
 			{ "disconnect_character",		pc_disconnect_character	},
 			{ NULL,			NULL			}
 		};

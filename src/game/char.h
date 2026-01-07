@@ -2060,6 +2060,7 @@ class CHARACTER : public CEntity, public CFSM, public CHorseRider
 		void CalculateIdleRewards();
 		DWORD GetIdleHuntingTimeToday() const { return m_idleHunting.totalTimeToday; }
 		DWORD GetIdleHuntingMaxDaily() const { return m_idleHunting.maxDailySeconds; }
+		DWORD GetIdleHuntingDuration() const;
 		void SetIdleHuntingMaxDaily(DWORD seconds) { 
 			m_idleHunting.maxDailySeconds = seconds; 
 			SaveIdleHunting();
@@ -2078,6 +2079,7 @@ class CHARACTER : public CEntity, public CFSM, public CHorseRider
 		struct IdleHuntingData {
 			DWORD mobVnum;
 			DWORD startTime;
+			DWORD endTime;
 			DWORD lastClaimTime;
 			DWORD totalTimeToday;
 			DWORD maxDailySeconds; // Configurable max time (default 28800 = 8 hours)
