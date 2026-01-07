@@ -2051,6 +2051,45 @@ class CHARACTER : public CEntity, public CFSM, public CHorseRider
 	private:
 		DWORD m_dwLastCombatTime;
 	// tw1x1: end
+
+	// Idle Hunting System
+	public:
+		void LoadIdleHunting();
+		void StartIdleHunting(DWORD mobVnum);
+		void StopIdleHunting();
+		void CalculateIdleRewards();
+		DWORD GetIdleHuntingTimeToday() const { return m_idleHunting.totalTimeToday; }
+		DWORD GetIdleHuntingMaxDaily() const { return m_idleHunting.maxDailySeconds; }
+		void SetIdleHuntingMaxDaily(DWORD seconds) { 
+			m_idleHunting.maxDailySeconds = seconds; 
+			SaveIdleHunting();
+		}
+		bool IsIdleHuntingActive() const { return m_idleHunting.isActive == 1; }
+		BYTE GetIdleHuntingState() const { 
+			// Returns state: 0=none, 1=pending (mob set but not logged out), 2=ready to claim
+			if (m_idleHunting.mobVnum == 0) return 0;
+			return m_idleHunting.isActive;
+		}
+
+	private:
+		void SaveIdleHunting();
+		void GenerateIdleHuntingDrops(DWORD mobVnum, int killCount);
+		
+		struct IdleHuntingData {
+			DWORD mobVnum;
+			DWORD startTime;
+			DWORD lastClaimTime;
+			DWORD totalTimeToday;
+			DWORD maxDailySeconds; // Configurable max time (default 28800 = 8 hours)
+			char lastResetDate[11]; // YYYY-MM-DD format
+			BYTE isActive; // 0=pending, 1=hunting (offline), 2=ready to claim
+			
+			IdleHuntingData() : mobVnum(0), startTime(0), lastClaimTime(0), 
+							totalTimeToday(0), maxDailySeconds(28800), isActive(0)
+			{
+				strcpy(lastResetDate, "2000-01-01");
+			}
+		} m_idleHunting;
 };
 
 ESex GET_SEX(LPCHARACTER ch);
