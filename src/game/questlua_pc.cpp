@@ -22,6 +22,7 @@
 #include "utils.h"
 #include "unique_item.h"
 #include "mob_manager.h"
+#include "idle_hunting_manager.h"
 #include <cctype>
 
 #undef sys_err
@@ -2993,6 +2994,68 @@ teleport_area:
 		return 1;
 	}
 
+	int pc_get_idle_hunting_group_id(lua_State* L)
+	{
+		LPCHARACTER ch = CQuestManager::instance().GetCurrentCharacterPtr();
+		if (!ch || !ch->IsPC())
+		{
+			lua_pushnumber(L, 0);
+			return 1;
+		}
+		
+		lua_pushnumber(L, ch->GetIdleHuntingGroupId());
+		return 1;
+	}
+
+	int pc_get_available_idle_hunting_groups(lua_State* L)
+	{
+		LPCHARACTER ch = CQuestManager::instance().GetCurrentCharacterPtr();
+		if (!ch || !ch->IsPC())
+		{
+			lua_newtable(L);
+			return 1;
+		}
+
+		BYTE level = ch->GetLevel();
+		bool is_premium = ch->IsGM(); // TODO: Replace with actual premium check
+
+		std::vector<const IdleHuntingGroup*> available_groups = CIdleHuntingManager::instance().GetAvailableGroups(level, is_premium);
+		
+		lua_newtable(L);
+		int index = 1;
+		for (const IdleHuntingGroup* group : available_groups)
+		{
+			if (group)
+			{
+				lua_newtable(L); // Create group table
+				
+				lua_pushstring(L, "id");
+				lua_pushnumber(L, group->group_id);
+				lua_settable(L, -3);
+				
+				lua_pushstring(L, "name");
+				lua_pushstring(L, group->name.c_str());
+				lua_settable(L, -3);
+				
+				lua_pushstring(L, "display_name");
+				lua_pushstring(L, group->display_name.c_str());
+				lua_settable(L, -3);
+				
+				lua_pushstring(L, "min_level");
+				lua_pushnumber(L, group->min_level);
+				lua_settable(L, -3);
+				
+				lua_pushstring(L, "premium_only");
+				lua_pushboolean(L, group->premium_only);
+				lua_settable(L, -3);
+				
+				lua_rawseti(L, -2, index++); // Insert into array
+			}
+		}
+		
+		return 1;
+	}
+
 	int pc_disconnect_character(lua_State* L)
 	{
 		LPCHARACTER ch = CQuestManager::instance().GetCurrentCharacterPtr();
@@ -3233,6 +3296,8 @@ teleport_area:
 			{ "set_idle_hunting_max_time",	pc_set_idle_hunting_max_time	},
 			{ "add_idle_hunting_time",		pc_add_idle_hunting_time	},
 			{ "get_idle_hunting_duration", pc_get_idle_hunting_duration },
+			{ "get_idle_hunting_group_id",	pc_get_idle_hunting_group_id	},
+			{ "get_available_idle_hunting_groups", pc_get_available_idle_hunting_groups },
 			{ "disconnect_character",		pc_disconnect_character	},
 			{ NULL,			NULL			}
 		};

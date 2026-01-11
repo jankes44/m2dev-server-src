@@ -8,6 +8,7 @@
 #include "desc.h"
 #include "log.h"
 #include "questmanager.h"
+#include "idle_hunting_manager.h"
 
 // Configuration
 static const DWORD MAX_DAILY_SECONDS = 28800; // 8 hours
@@ -21,7 +22,7 @@ void CHARACTER::LoadIdleHunting()
         return;
 
     std::unique_ptr<SQLMsg> pMsg(DBManager::instance().DirectQuery(
-        "SELECT mob_vnum, start_time, end_time, last_claim_time, total_time_today, last_reset_date, is_active, max_daily_seconds "
+        "SELECT mob_group_id, start_time, end_time, last_claim_time, total_time_today, last_reset_date, is_active, max_daily_seconds "
         "FROM idle_hunting WHERE pid = %u", 
         GetPlayerID()));
     
@@ -29,7 +30,7 @@ void CHARACTER::LoadIdleHunting()
     {
         MYSQL_ROW row = mysql_fetch_row(pMsg->Get()->pSQLResult);
         
-        m_idleHunting.mobVnum = strtoul(row[0], nullptr, 10);
+        m_idleHunting.groupId = strtoul(row[0], nullptr, 10);
         m_idleHunting.startTime = strtoul(row[1], nullptr, 10);
         m_idleHunting.endTime = strtoul(row[2], nullptr, 10);
         m_idleHunting.lastClaimTime = strtoul(row[3], nullptr, 10);
@@ -38,17 +39,17 @@ void CHARACTER::LoadIdleHunting()
         
         if (row[5])
             strncpy(m_idleHunting.lastResetDate, row[5], sizeof(m_idleHunting.lastResetDate) - 1);
-        
+
         m_idleHunting.isActive = atoi(row[6]);
-        
+
         // If hunt was active (is_active=1), player logged back in, set to "ready to claim" state
         if (m_idleHunting.isActive == 1)
         {
-            const CMob* mobData = CMobManager::instance().Get(m_idleHunting.mobVnum);
-            if (!mobData)
+            const IdleHuntingGroup* group = CIdleHuntingManager::instance().GetGroup(m_idleHunting.groupId);
+            if (!group)
             {
-                sys_err("Idle Hunting: Invalid mob vnum %u for player %u", m_idleHunting.mobVnum, GetPlayerID());
-                m_idleHunting.mobVnum = 0;
+                sys_err("Idle Hunting: Invalid group ID %u for player %u", m_idleHunting.groupId, GetPlayerID());
+                m_idleHunting.groupId = 0;
                 m_idleHunting.isActive = 0;
                 SaveIdleHunting();
                 return;
@@ -68,35 +69,54 @@ void CHARACTER::LoadIdleHunting()
             sys_log(0, "IDLE_HUNT: Player %u logged in with unclaimed rewards", GetPlayerID());
             ChatPacket(CHAT_TYPE_INFO, "You have unclaimed idle hunt rewards! Talk to the NPC to claim them.");
         }
+        
+        // Send state update to client
+        if (GetDesc())
+        {
+            extern void SendIdleHuntingUpdateToClient(LPCHARACTER ch);
+            SendIdleHuntingUpdateToClient(this);
+        }
     }
 }
 
-void CHARACTER::StartIdleHunting(DWORD mobVnum)
+void CHARACTER::StartIdleHunting(DWORD groupId)
 {
-    sys_log(0, "IDLE_HUNT: StartIdleHunting called for player %u, mob %u", GetPlayerID(), mobVnum);
+    sys_log(0, "IDLE_HUNT: StartIdleHunting called for player %u, group %u", GetPlayerID(), groupId);
     
+    // Validation
     if (!IsPC())
     {
         sys_log(0, "IDLE_HUNT: Not a PC, returning");
         return;
     }
 
-    // Validate mob exists
-    const CMob* mobData = CMobManager::instance().Get(mobVnum);
-    if (!mobData)
+    const IdleHuntingGroup* group = CIdleHuntingManager::instance().GetGroup(groupId);
+    if (!group)
     {
-        sys_log(0, "IDLE_HUNT: Mob %u not found in CMobManager!", mobVnum);
-        ChatPacket(CHAT_TYPE_INFO, "Invalid monster selection!");
-        sys_err("Idle Hunting: Player %u tried to hunt invalid mob %u", GetPlayerID(), mobVnum);
+        sys_log(0, "IDLE_HUNT: Group %u not found!", groupId);
+        ChatPacket(CHAT_TYPE_INFO, "Invalid hunting group selection!");
+        sys_err("Idle Hunting: Player %u tried to hunt invalid group %u", GetPlayerID(), groupId);
+        return;
+    }
+
+    if (GetLevel() < group->min_level)
+    {
+        ChatPacket(CHAT_TYPE_INFO, "You need level %d to hunt this group!", group->min_level);
+        return;
+    }
+
+    // Check premium requirement
+    if (group->premium_only && !IsGM())  // Replace with proper premium check when available
+    {
+        ChatPacket(CHAT_TYPE_INFO, "This hunting group requires premium status!");
         return;
     }
     
-    sys_log(0, "IDLE_HUNT: Mob validated: %s (level %d)", mobData->m_table.szLocaleName, mobData->m_table.bLevel);
+    sys_log(0, "IDLE_HUNT: Group validated: %s (level %d)", group->name.c_str(), group->min_level);
 
-    // Check if hunt is pending, active, or has unclaimed rewards
-    if (m_idleHunting.mobVnum > 0)
+    if (m_idleHunting.groupId > 0)
     {
-        sys_log(0, "IDLE_HUNT: Hunt already configured (mob=%u, is_active=%d), returning", m_idleHunting.mobVnum, m_idleHunting.isActive);
+        sys_log(0, "IDLE_HUNT: Hunt already configured (group=%u, is_active=%d), returning", m_idleHunting.groupId, m_idleHunting.isActive);
         if (m_idleHunting.isActive == 0)
             ChatPacket(CHAT_TYPE_INFO, "You already configured a hunt. Log out to start, or cancel it first!");
         else if (m_idleHunting.isActive == 1)
@@ -132,10 +152,10 @@ void CHARACTER::StartIdleHunting(DWORD mobVnum)
         return;
     }
 
-    sys_log(0, "IDLE_HUNT: Configuring idle hunt for player %u, mob %u (pending logout)", GetPlayerID(), mobVnum);
+    sys_log(0, "IDLE_HUNT: Configuring idle hunt for player %u, group %u (pending logout)", GetPlayerID(), groupId);
     
     // Set to pending state - hunt won't start until player logs out
-    m_idleHunting.mobVnum = mobVnum;
+    m_idleHunting.groupId = groupId;
     m_idleHunting.startTime = 0; // Will be set on logout
     m_idleHunting.endTime = 0;
     m_idleHunting.lastClaimTime = 0;
@@ -147,23 +167,23 @@ void CHARACTER::StartIdleHunting(DWORD mobVnum)
     SaveIdleHunting();
     sys_log(0, "IDLE_HUNT: SaveIdleHunting completed for player %u", GetPlayerID());
     
-    ChatPacket(CHAT_TYPE_INFO, "Idle hunt configured. Log out to start hunting %s!", mobData->m_table.szLocaleName);
+    ChatPacket(CHAT_TYPE_INFO, "Idle hunt configured for '%s'. Log out to start hunting!", group->name.c_str());
     
     char szHint[128];
-    snprintf(szHint, sizeof(szHint), "mob_vnum %u level %d (pending)", mobVnum, mobData->m_table.bLevel);
+    snprintf(szHint, sizeof(szHint), "group_id %u level %d (pending)", groupId, group->min_level);
     LogManager::instance().CharLog(this, 0, "IDLE_HUNT_CONFIG", szHint);
 }
 
 void CHARACTER::StopIdleHunting()
 {
-    if (m_idleHunting.mobVnum == 0)
+    if (m_idleHunting.groupId == 0)
         return;
 
     char szHint[128];
-    snprintf(szHint, sizeof(szHint), "mob_vnum %u time_used %u state %d", m_idleHunting.mobVnum, m_idleHunting.totalTimeToday, m_idleHunting.isActive);
+    snprintf(szHint, sizeof(szHint), "group_id %u time_used %u state %d", m_idleHunting.groupId, m_idleHunting.totalTimeToday, m_idleHunting.isActive);
     LogManager::instance().CharLog(this, 0, "IDLE_HUNT_STOP", szHint);
     
-    m_idleHunting.mobVnum = 0;
+    m_idleHunting.groupId = 0;
     m_idleHunting.isActive = 0;
     m_idleHunting.startTime = 0;
     m_idleHunting.endTime = 0;
@@ -179,6 +199,15 @@ void CHARACTER::CalculateIdleRewards()
     if (m_idleHunting.isActive != 2)
     {
         ChatPacket(CHAT_TYPE_INFO, "No idle hunt rewards to claim!");
+        return;
+    }
+
+    // Validate group
+    const IdleHuntingGroup* group = CIdleHuntingManager::instance().GetGroup(m_idleHunting.groupId);
+    if (!group)
+    {
+        sys_err("Idle Hunting: Invalid group %u for player %u", m_idleHunting.groupId, GetPlayerID());
+        StopIdleHunting();
         return;
     }
 
@@ -235,17 +264,8 @@ void CHARACTER::CalculateIdleRewards()
     
     // Update daily time counter
     m_idleHunting.totalTimeToday += elapsedSeconds;
-    
-    // Get mob data
-    const CMob* mobData = CMobManager::instance().Get(m_idleHunting.mobVnum);
-    if (!mobData)
-    {
-        sys_err("Idle Hunting: Invalid mob %u for player %u", m_idleHunting.mobVnum, GetPlayerID());
-        StopIdleHunting();
-        return;
-    }
-    
-        // Get player combat stats
+
+    // Get player combat stats
     int playerLevel = GetLevel();
     int playerAttGrade = GetPoint(POINT_ATT_GRADE);
     int playerAtkSpeed = GetPoint(POINT_ATT_SPEED);
@@ -257,237 +277,227 @@ void CHARACTER::CalculateIdleRewards()
 
     if (pWeapon && pWeapon->GetType() == ITEM_WEAPON)
     {
-        weaponDamageMin = pWeapon->GetValue(3); // Weapon min damage
-        weaponDamageMax = pWeapon->GetValue(4); // Weapon max damage
+        weaponDamageMin = pWeapon->GetValue(3);
+        weaponDamageMax = pWeapon->GetValue(4);
     }
 
-    // Get mob stats  
-    int mobLevel = mobData->m_table.bLevel;
-    DWORD mobHP = mobData->m_table.dwMaxHP;
-    int mobDefGrade = mobData->m_table.wDef;
-
-    // Calculate base weapon damage (average of min/max, multiplied by 2 like in CalcMeleeDamage)
+    // Calculate base weapon damage
     int weaponDamage = ((weaponDamageMin + weaponDamageMax) / 2) * 2;
 
-    // Simplified attack calculation based on CalcMeleeDamage formula
-    // Real formula: iAtk = (ATT_GRADE + weaponDam - Level*2) * AR + Level*2
-    // For idle hunting, we use average attack rating ~0.8
-    float attackRating = 1.0f; 
-    int baseAttack = playerAttGrade + weaponDamage - (playerLevel * 2);
-    int totalAttack = (int)(baseAttack * attackRating) + (playerLevel * 2);
-
-    // Defense calculation (simplified)
-    int totalDefense = mobDefGrade;
-
-    // Effective damage per hit
-    int effectiveDamage = MAX(1, totalAttack - totalDefense);
-
-    // Calculate hits needed to kill
-    float hitsToKill = (float)mobHP / (float)effectiveDamage;
-
-    // Calculate attack speed factor (100 = normal, 120 = 20% faster)
+    // Calculate attack speed factor
     float attackSpeedFactor = playerAtkSpeed / 100.0f;
-    if (attackSpeedFactor < 0.5f) attackSpeedFactor = 0.5f; // Min 50% speed
+    if (attackSpeedFactor < 0.5f) attackSpeedFactor = 0.5f;
 
-    // Base time per attack: ~2 seconds, modified by attack speed
+    // Base time per attack
     float secondsPerHit = 2.0f / attackSpeedFactor;
 
-    // Time to kill one mob (combat time)
-    float combatTime = hitsToKill * secondsPerHit;
+    // Calculate total weight for distribution
+    int totalWeight = 0;
+    for (const auto& mob : group->mobs)
+        totalWeight += mob.weight;
 
-    // Add movement/preparation time (~4 seconds between mobs)
-    float totalTimePerKill = combatTime + 4.0f;
+    if (totalWeight <= 0)
+    {
+        sys_err("Idle Hunting: Group %u has zero total weight", m_idleHunting.groupId);
+        StopIdleHunting();
+        return;
+    }
 
-    // Calculate kills per hour
-    float killsPerHour = 3600.0f / totalTimePerKill;
+    // Calculate weighted averages across all mobs in the group
+    float totalKills = 0;
+    QWORD totalExp = 0;
+    DWORD totalGold = 0;
 
-    // Apply level difference efficiency penalty
-    int levelDiff = playerLevel - mobLevel;
-    float efficiencyRate = 1.0f;
+    for (const auto& groupMob : group->mobs)
+    {
+        const CMob* mobData = CMobManager::instance().Get(groupMob.mob_vnum);
+        if (!mobData)
+        {
+            sys_err("Idle Hunting: Invalid mob %u in group %u", groupMob.mob_vnum, m_idleHunting.groupId);
+            continue;
+        }
 
-    if (levelDiff > 10)
-        efficiencyRate = 0.1f; // 90% penalty if 10+ levels above
-    else if (levelDiff > 5)
-        efficiencyRate = 0.5f; // 50% penalty if 5-10 levels above
-    else if (levelDiff < -10)
-        efficiencyRate = 0.2f; // 80% penalty if 10+ levels below
-    else if (levelDiff < -5)
-        efficiencyRate = 0.4f; // 60% penalty if 5-10 levels below
+        // Calculate this mob's share of hunting time based on weight
+        float mobTimeFraction = (float)groupMob.weight / (float)totalWeight;
+        DWORD mobElapsedSeconds = (DWORD)(elapsedSeconds * mobTimeFraction);
 
-    killsPerHour *= efficiencyRate;
+        // Get mob stats
+        int mobLevel = mobData->m_table.bLevel;
+        DWORD mobHP = mobData->m_table.dwMaxHP;
+        int mobDefGrade = mobData->m_table.wDef;
+
+        // Calculate damage and kills for this mob
+        float attackRating = 1.0f;
+        int baseAttack = playerAttGrade + weaponDamage - (playerLevel * 2);
+        int totalAttack = (int)(baseAttack * attackRating) + (playerLevel * 2);
+        int totalDefense = mobDefGrade;
+        int effectiveDamage = MAX(1, totalAttack - totalDefense);
+
+        float hitsToKill = (float)mobHP / (float)effectiveDamage;
+        float combatTime = hitsToKill * secondsPerHit;
+        float totalTimePerKill = combatTime + 4.0f;
+        float killsPerHour = 3600.0f / totalTimePerKill;
+
+        // Apply level difference efficiency
+        int levelDiff = playerLevel - mobLevel;
+        float efficiencyRate = 1.0f;
+
+        if (levelDiff > 10)
+            efficiencyRate = 0.1f;
+        else if (levelDiff > 5)
+            efficiencyRate = 0.5f;
+        else if (levelDiff < -10)
+            efficiencyRate = 0.2f;
+        else if (levelDiff < -5)
+            efficiencyRate = 0.4f;
+
+        killsPerHour *= efficiencyRate;
+
+        // Sanity caps per mob
+        if (killsPerHour < 10.0f)
+            killsPerHour = 10.0f;
+        if (killsPerHour > 500.0f)
+            killsPerHour = 500.0f;
+
+        float mobKills = (mobElapsedSeconds / 3600.0f) * killsPerHour;
+        totalKills += mobKills;
+
+        // Calculate exp for this mob with level bonuses
+        QWORD expPerKill = mobData->m_table.dwExp;
+        float levelExpMultiplier = EXP_RATE_MODIFIER;
+        if (playerLevel <= 10)
+            levelExpMultiplier *= 5.0f;
+        else if (playerLevel <= 30)
+            levelExpMultiplier *= 3.0f;
+        else if (playerLevel <= 50)
+            levelExpMultiplier *= 2.0f;
+
+        QWORD mobExp = static_cast<QWORD>(mobKills * expPerKill * levelExpMultiplier);
+        totalExp += mobExp;
+
+        // Calculate gold for this mob
+        int goldMin = mobData->m_table.dwGoldMin;
+        int goldMax = mobData->m_table.dwGoldMax;
+        int mobKillsInt = (int)mobKills;
+
+        for (int i = 0; i < mobKillsInt; i++)
+        {
+            if (number(1, 100) <= 30) // 30% gold drop chance
+            {
+                totalGold += number(goldMin, goldMax);
+            }
+        }
+    }
+
+    // Apply group multipliers
+    totalExp = static_cast<QWORD>(totalExp * group->exp_multiplier);
+    totalGold = static_cast<DWORD>(totalGold * group->yang_multiplier * YANG_RATE_MODIFIER);
 
     // Sanity caps
-    if (killsPerHour < 10.0f) 
-        killsPerHour = 10.0f;   // Minimum 10/hour
-    if (killsPerHour > 500.0f) 
-        killsPerHour = 500.0f;  // Maximum 500/hour
-
-    int totalKills = static_cast<int>((elapsedSeconds / 3600.0f) * killsPerHour);
-
-    // Sanity check on kills
-    if (totalKills < 0)
-        totalKills = 0;
-    if (totalKills > 10000) // Max 10k kills per session
+    int totalKillsInt = static_cast<int>(totalKills);
+    if (totalKillsInt < 0)
+        totalKillsInt = 0;
+    if (totalKillsInt > 10000)
     {
-        sys_err("Idle Hunting: Suspicious kill count %d for player %u", totalKills, GetPlayerID());
-        totalKills = 10000;
+        sys_err("Idle Hunting: Suspicious kill count %d for player %u", totalKillsInt, GetPlayerID());
+        totalKillsInt = 10000;
     }
-    
-    // Calculate EXP with level-based bonus
-    QWORD expPerKill = mobData->m_table.dwExp;
-    
-    // Level-based exp multiplier for idle hunting
-    float levelExpMultiplier = EXP_RATE_MODIFIER;
-    if (playerLevel <= 10)
-        levelExpMultiplier *= 5.0f; // 5x bonus for levels 1-10
-    else if (playerLevel <= 30)
-        levelExpMultiplier *= 3.0f; // 3x bonus for levels 11-30
-    else if (playerLevel <= 50)
-        levelExpMultiplier *= 2.0f; // 2x bonus for levels 31-50
-    
-    QWORD totalExp = static_cast<QWORD>(totalKills * expPerKill * levelExpMultiplier);
-    
-    // Cap total exp
-    if (totalExp > 2000000000) // 2 billion cap
+
+    if (totalExp > 2000000000)
     {
         sys_err("Idle Hunting: Suspicious exp %llu for player %u", totalExp, GetPlayerID());
         totalExp = 2000000000;
     }
-    
-    // Apply exp
-    if (totalExp > 0)
-    {
-        PointChange(POINT_EXP, static_cast<int>(totalExp));
-    }
-    
-    // Generate items and yang
-    GenerateIdleHuntingDrops(m_idleHunting.mobVnum, totalKills);
-    
-    // Log claim
-    const CMob* claimMobData = CMobManager::instance().Get(m_idleHunting.mobVnum);
-    const char* mobName = claimMobData ? claimMobData->m_table.szLocaleName : "Unknown";
-    char szHint[256];
-    snprintf(szHint, sizeof(szHint), "mob_vnum %u (%s) kills %d exp %lu time %us", m_idleHunting.mobVnum, mobName, totalKills, totalExp, elapsedSeconds);
-    LogManager::instance().CharLog(this, 0, "IDLE_HUNT_CLAIM", szHint);
-    
-    // Format time for display
-    int hours = elapsedSeconds / 3600;
-    int minutes = (elapsedSeconds % 3600) / 60;
-    int remainingHours = (m_idleHunting.maxDailySeconds - m_idleHunting.totalTimeToday) / 3600;
-    int remainingMinutes = ((m_idleHunting.maxDailySeconds - m_idleHunting.totalTimeToday) % 3600) / 60;
-    
-    ChatPacket(CHAT_TYPE_INFO, "=== Idle Hunting Results ===");
-    ChatPacket(CHAT_TYPE_INFO, "Time hunted: %dh %dm", hours, minutes);
-    ChatPacket(CHAT_TYPE_INFO, "Killed: %d mobs", totalKills);
-    ChatPacket(CHAT_TYPE_INFO, "Gained: %llu experience", totalExp);
-    ChatPacket(CHAT_TYPE_INFO, "Daily time remaining: %dh %dm", remainingHours, remainingMinutes);
-    
-    // Update last claim time
-    m_idleHunting.lastClaimTime = currentTime;
-    
-    // Automatically stop idle hunting
-    StopIdleHunting();
-}
 
-void CHARACTER::GenerateIdleHuntingDrops(DWORD mobVnum, int killCount)
-{
-    if (killCount <= 0)
-        return;
-
-    const CMob* dropMobData = CMobManager::instance().Get(mobVnum);
-    if (!dropMobData)
-        return;
-    
-    // Gold drops (reduced rate for idle)
-    int goldMin = dropMobData->m_table.dwGoldMin;
-    int goldMax = dropMobData->m_table.dwGoldMax;
-    DWORD totalGold = 0;
-    
-    for (int i = 0; i < killCount; i++)
-    {
-        if (number(1, 100) <= 30) // 30% gold drop chance when idle
-        {
-            totalGold += number(goldMin, goldMax);
-        }
-    }
-    
-    // Apply yang rate modifier
-    totalGold = static_cast<DWORD>(totalGold * YANG_RATE_MODIFIER);
-    
-    // Cap yang
-    if (totalGold > 2000000000) // 2 billion cap
+    if (totalGold > 2000000000)
     {
         sys_err("Idle Hunting: Suspicious yang %u for player %u", totalGold, GetPlayerID());
         totalGold = 2000000000;
     }
-    
+
+    // Apply rewards
+    if (totalExp > 0)
+        PointChange(POINT_EXP, static_cast<int>(totalExp));
+
     if (totalGold > 0)
     {
         PointChange(POINT_GOLD, totalGold);
         ChatPacket(CHAT_TYPE_INFO, "Earned %u yang from idle hunting!", totalGold);
         
         char szYangHint[128];
-        snprintf(szYangHint, sizeof(szYangHint), "yang_earned %u kills %d", totalGold, killCount);
+        snprintf(szYangHint, sizeof(szYangHint), "yang_earned %u kills %d group %u", totalGold, totalKillsInt, m_idleHunting.groupId);
         LogManager::instance().CharLog(this, 0, "IDLE_HUNT_YANG", szYangHint);
     }
-    
-    // Use actual mob drop tables from mob_drop_item.txt
+
+    // Generate items from group drop table
+    GenerateIdleHuntingDrops(m_idleHunting.groupId, totalKillsInt);
+
+    // Log claim
+    char szHint[256];
+    snprintf(szHint, sizeof(szHint), "group_id %u (%s) kills %d exp %llu time %us", 
+        m_idleHunting.groupId, group->name.c_str(), totalKillsInt, totalExp, elapsedSeconds);
+    LogManager::instance().CharLog(this, 0, "IDLE_HUNT_CLAIM", szHint);
+
+    // Format time for display
+    int hours = elapsedSeconds / 3600;
+    int minutes = (elapsedSeconds % 3600) / 60;
+    int remainingHours = (m_idleHunting.maxDailySeconds - m_idleHunting.totalTimeToday) / 3600;
+    int remainingMinutes = ((m_idleHunting.maxDailySeconds - m_idleHunting.totalTimeToday) % 3600) / 60;
+
+    ChatPacket(CHAT_TYPE_INFO, "=== Idle Hunting Results ===");
+    ChatPacket(CHAT_TYPE_INFO, "Group: %s", group->name.c_str());
+    ChatPacket(CHAT_TYPE_INFO, "Time hunted: %dh %dm", hours, minutes);
+    ChatPacket(CHAT_TYPE_INFO, "Killed: %d mobs", totalKillsInt);
+    ChatPacket(CHAT_TYPE_INFO, "Gained: %llu experience", totalExp);
+    ChatPacket(CHAT_TYPE_INFO, "Daily time remaining: %dh %dm", remainingHours, remainingMinutes);
+
+    // Update last claim time
+    m_idleHunting.lastClaimTime = currentTime;
+
+    // Automatically stop idle hunting
+    StopIdleHunting();
+}
+
+void CHARACTER::GenerateIdleHuntingDrops(DWORD groupId, int killCount)
+{
+    if (killCount <= 0)
+        return;
+
+    const IdleHuntingGroup* group = CIdleHuntingManager::instance().GetGroup(groupId);
+    if (!group)
+    {
+        sys_err("Idle Hunting: Invalid group %u for drops", groupId);
+        return;
+    }
+
     int itemsDropped = 0;
-    std::map<DWORD, int> collectedItems; // Track items to batch create
-    
-    // Process "kill" type drops (mob_drop_item.txt kill drops)
-    CMobItemGroup* pMobItemGroup = ITEM_MANAGER::instance().GetMobItemGroup(mobVnum);
-    if (pMobItemGroup && !pMobItemGroup->IsEmpty())
+    std::map<DWORD, int> collectedItems;
+
+    // Use group drop table
+    for (const auto& drop : group->drops)
     {
-        int killPerDrop = pMobItemGroup->GetKillPerDrop();
-        if (killPerDrop > 0)
+        for (int i = 0; i < killCount; i++)
         {
-            // Calculate drops based on kill count with reduced rate for idle
-            for (int i = 0; i < killCount; i++)
+            // Adjust drop chance for idle (50% of configured rate)
+            int adjustedChance = drop.drop_chance / 2;
+            if (adjustedChance > 0 && number(1, 10000) <= adjustedChance)
             {
-                // 50% of normal drop rate for idle hunting (multiply by 2 instead of 10)
-                if (number(1, killPerDrop * 2) == 1)
-                {
-                    const CMobItemGroup::SMobItemGroupInfo& info = pMobItemGroup->GetOne();
-                    if (info.dwItemVnum > 0)
-                    {
-                        collectedItems[info.dwItemVnum] += info.iCount;
-                    }
-                }
+                int count = number(drop.min_count, drop.max_count);
+                collectedItems[drop.item_vnum] += count;
             }
         }
     }
-    
-    // Process "drop" type drops (mob_drop_item.txt drop items)
-    CDropItemGroup* pDropItemGroup = ITEM_MANAGER::instance().GetDropItemGroup(mobVnum);
-    if (pDropItemGroup)
-    {
-        const std::vector<CDropItemGroup::SDropItemGroupInfo>& vec = pDropItemGroup->GetVector();
-        for (const auto& dropInfo : vec)
-        {
-            // Calculate how many times this item should drop
-            for (int i = 0; i < killCount; i++)
-            {
-                // Use 50% of normal drop rate for idle hunting (divide by 2 instead of 20)
-                int adjustedPct = dropInfo.dwPct / 2;
-                if (adjustedPct > 0 && number(1, 10000) <= adjustedPct)
-                {
-                    collectedItems[dropInfo.dwVnum] += dropInfo.iCount;
-                }
-            }
-        }
-    }
-    
+
     // Create and give all collected items
     for (const auto& pair : collectedItems)
     {
         DWORD itemVnum = pair.first;
         int totalCount = pair.second;
-        
+
         // Cap individual item stacks
         if (totalCount > 200)
             totalCount = 200;
-        
+
         // Give items in stacks
         while (totalCount > 0 && itemsDropped < 100) // Max 100 item stacks
         {
@@ -495,6 +505,7 @@ void CHARACTER::GenerateIdleHuntingDrops(DWORD mobVnum, int killCount)
             LPITEM item = AutoGiveItem(itemVnum, giveCount);
             if (item)
             {
+                ChatPacket(CHAT_TYPE_INFO, "+ %s x%d", item->GetName(), giveCount);
                 itemsDropped++;
                 totalCount -= giveCount;
             }
@@ -502,10 +513,9 @@ void CHARACTER::GenerateIdleHuntingDrops(DWORD mobVnum, int killCount)
                 break; // Inventory full
         }
     }
-    
+
     if (itemsDropped > 0)
     {
-        ChatPacket(CHAT_TYPE_INFO, "Received items from idle hunting!");
         char szHint[64];
         snprintf(szHint, sizeof(szHint), "%d", itemsDropped);
         LogManager::instance().CharLog(this, 0, "IDLE_HUNT_ITEMS", szHint);
@@ -527,10 +537,10 @@ void CHARACTER::SaveIdleHunting()
     char szQuery[512];
     snprintf(szQuery, sizeof(szQuery),
         "REPLACE INTO player.idle_hunting "
-        "(pid, mob_vnum, start_time, end_time, last_claim_time, total_time_today, last_reset_date, is_active, max_daily_seconds) "
+        "(pid, mob_group_id, start_time, end_time, last_claim_time, total_time_today, last_reset_date, is_active, max_daily_seconds) "
         "VALUES(%u, %u, %u, %u, %u, %u, '%s', %d, %u)", 
         GetPlayerID(), 
-        m_idleHunting.mobVnum, 
+        m_idleHunting.groupId, 
         m_idleHunting.startTime,
         m_idleHunting.endTime,
         m_idleHunting.lastClaimTime,

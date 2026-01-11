@@ -2055,12 +2055,13 @@ class CHARACTER : public CEntity, public CFSM, public CHorseRider
 	// Idle Hunting System
 	public:
 		void LoadIdleHunting();
-		void StartIdleHunting(DWORD mobVnum);
+		void StartIdleHunting(DWORD groupId);
 		void StopIdleHunting();
 		void CalculateIdleRewards();
 		DWORD GetIdleHuntingTimeToday() const { return m_idleHunting.totalTimeToday; }
 		DWORD GetIdleHuntingMaxDaily() const { return m_idleHunting.maxDailySeconds; }
 		DWORD GetIdleHuntingDuration() const;
+		DWORD GetIdleHuntingGroupId() const { return m_idleHunting.groupId; }
 		void SetIdleHuntingMaxDaily(DWORD seconds) { 
 			m_idleHunting.maxDailySeconds = seconds; 
 			SaveIdleHunting();
@@ -2068,16 +2069,16 @@ class CHARACTER : public CEntity, public CFSM, public CHorseRider
 		bool IsIdleHuntingActive() const { return m_idleHunting.isActive == 1; }
 		BYTE GetIdleHuntingState() const { 
 			// Returns state: 0=none, 1=pending (mob set but not logged out), 2=ready to claim
-			if (m_idleHunting.mobVnum == 0) return 0;
+			if (m_idleHunting.groupId == 0) return 0;
 			return m_idleHunting.isActive;
 		}
 
 	private:
 		void SaveIdleHunting();
-		void GenerateIdleHuntingDrops(DWORD mobVnum, int killCount);
+		void GenerateIdleHuntingDrops(DWORD groupId, int killCount);
 		
 		struct IdleHuntingData {
-			DWORD mobVnum;
+			DWORD groupId;
 			DWORD startTime;
 			DWORD endTime;
 			DWORD lastClaimTime;
@@ -2086,7 +2087,7 @@ class CHARACTER : public CEntity, public CFSM, public CHorseRider
 			char lastResetDate[11]; // YYYY-MM-DD format
 			BYTE isActive; // 0=pending, 1=hunting (offline), 2=ready to claim
 			
-			IdleHuntingData() : mobVnum(0), startTime(0), lastClaimTime(0), 
+			IdleHuntingData() : groupId(0), startTime(0), lastClaimTime(0), 
 							totalTimeToday(0), maxDailySeconds(28800), isActive(0)
 			{
 				strcpy(lastResetDate, "2000-01-01");

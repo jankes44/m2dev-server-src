@@ -1398,15 +1398,15 @@ void CHARACTER::Disconnect(const char * c_pszReason)
 
 	SaveAffect();
 	
-	// Activate idle hunting if in pending state
-	if (m_idleHunting.mobVnum > 0 && m_idleHunting.isActive == 0)
-	{
-		time_t now = time(0);
-		m_idleHunting.isActive = 1; // Set to hunting state
-		m_idleHunting.startTime = static_cast<DWORD>(now);
-		m_idleHunting.lastClaimTime = static_cast<DWORD>(now);
-		sys_log(0, "IDLE_HUNT: Activated hunt on logout for player %u, mob %u", GetPlayerID(), m_idleHunting.mobVnum);
-	}
+    // Activate idle hunting if in pending state
+    if (m_idleHunting.groupId > 0 && m_idleHunting.isActive == 0)
+    {
+        time_t now = time(0);
+        m_idleHunting.isActive = 1; // Set to hunting state
+        m_idleHunting.startTime = static_cast<DWORD>(now);
+        m_idleHunting.lastClaimTime = static_cast<DWORD>(now);
+        sys_log(0, "IDLE_HUNT: Activated hunt on logout for player %u, group %u", GetPlayerID(), m_idleHunting.groupId);
+    }
 	
 	SaveIdleHunting(); // Save idle hunting state on disconnect
 	m_bIsLoadedAffect = false;
