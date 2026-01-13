@@ -2330,7 +2330,7 @@ typedef struct SPacketCGIdleHunting
 typedef struct SPacketGCIdleHunting
 {
 	uint8_t	header;
-	uint8_t	state;				// 0=idle, 1=pending, 2=claimable
+	uint8_t	state;				// 0=idle, 1=active, 2=claimable
 	uint32_t	group_id;			// Current target group (0 if none)
 	uint32_t	time_left;			// Remaining daily time (seconds)
 	uint32_t	hunt_duration;		// Duration of current unclaimed hunt (seconds)

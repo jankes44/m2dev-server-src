@@ -2072,11 +2072,6 @@ class CHARACTER : public CEntity, public CFSM, public CHorseRider
 			if (m_idleHunting.groupId == 0) return 0;
 			return m_idleHunting.isActive;
 		}
-
-	private:
-		void SaveIdleHunting();
-		void GenerateIdleHuntingDrops(DWORD groupId, int killCount);
-		
 		struct IdleHuntingData {
 			DWORD groupId;
 			DWORD startTime;
@@ -2085,7 +2080,7 @@ class CHARACTER : public CEntity, public CFSM, public CHorseRider
 			DWORD totalTimeToday;
 			DWORD maxDailySeconds; // Configurable max time (default 28800 = 8 hours)
 			char lastResetDate[11]; // YYYY-MM-DD format
-			BYTE isActive; // 0=pending, 1=hunting (offline), 2=ready to claim
+			BYTE isActive; // 0=pending, 1=hunting (offline), 2=ready to claim, groupId!=0 implies pending, active or ready to claim
 			
 			IdleHuntingData() : groupId(0), startTime(0), lastClaimTime(0), 
 							totalTimeToday(0), maxDailySeconds(28800), isActive(0)
@@ -2093,6 +2088,10 @@ class CHARACTER : public CEntity, public CFSM, public CHorseRider
 				strcpy(lastResetDate, "2000-01-01");
 			}
 		} m_idleHunting;
+
+	private:
+		void SaveIdleHunting();
+		void GenerateIdleHuntingDrops(DWORD groupId, int killCount);
 };
 
 ESex GET_SEX(LPCHARACTER ch);

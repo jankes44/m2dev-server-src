@@ -13,7 +13,7 @@
 // Configuration
 static const DWORD MAX_DAILY_SECONDS = 28800; // 8 hours
 static const int BASE_KILLS_PER_HOUR = 100;
-static const float EXP_RATE_MODIFIER = 3.0f; // 300% of normal exp
+static const float EXP_RATE_MODIFIER = 1.0f; // 300% of normal exp
 static const float YANG_RATE_MODIFIER = 1.0f; // 100% of normal yang
 
 void CHARACTER::LoadIdleHunting()
@@ -41,6 +41,25 @@ void CHARACTER::LoadIdleHunting()
             strncpy(m_idleHunting.lastResetDate, row[5], sizeof(m_idleHunting.lastResetDate) - 1);
 
         m_idleHunting.isActive = atoi(row[6]);
+        
+        // Check for daily reset at login
+        time_t now = time(0);
+        struct tm* timeinfo = localtime(&now);
+        if (timeinfo)
+        {
+            char currentDate[11];
+            strftime(currentDate, sizeof(currentDate), "%Y-%m-%d", timeinfo);
+            
+            // Reset counter if new day
+            if (strcmp(currentDate, m_idleHunting.lastResetDate) != 0)
+            {
+                m_idleHunting.totalTimeToday = 0;
+                strncpy(m_idleHunting.lastResetDate, currentDate, sizeof(m_idleHunting.lastResetDate) - 1);
+                m_idleHunting.lastResetDate[sizeof(m_idleHunting.lastResetDate) - 1] = '\0';
+                SaveIdleHunting();
+                sys_log(0, "IDLE_HUNT: Daily reset for player %u at login (was %s, now %s)", GetPlayerID(), row[5], currentDate);
+            }
+        }
 
         // If hunt was active (is_active=1), player logged back in, set to "ready to claim" state
         if (m_idleHunting.isActive == 1)
@@ -61,13 +80,13 @@ void CHARACTER::LoadIdleHunting()
             SaveIdleHunting();
             
             sys_log(0, "IDLE_HUNT: Player %u logged in with active hunt, marked as ready to claim", GetPlayerID());
-            ChatPacket(CHAT_TYPE_INFO, "Your idle hunt is complete! Talk to the NPC to claim rewards.");
+            ChatPacket(CHAT_TYPE_INFO, LC_TEXT("IDLE_HUNT_COMPLETE_LOGIN"));
         }
         else if (m_idleHunting.isActive == 2)
         {
             // Player already has unclaimed rewards from a previous login
             sys_log(0, "IDLE_HUNT: Player %u logged in with unclaimed rewards", GetPlayerID());
-            ChatPacket(CHAT_TYPE_INFO, "You have unclaimed idle hunt rewards! Talk to the NPC to claim them.");
+            ChatPacket(CHAT_TYPE_INFO, LC_TEXT("IDLE_HUNT_UNCLAIMED_REWARDS"));
         }
         
         // Send state update to client
@@ -94,21 +113,21 @@ void CHARACTER::StartIdleHunting(DWORD groupId)
     if (!group)
     {
         sys_log(0, "IDLE_HUNT: Group %u not found!", groupId);
-        ChatPacket(CHAT_TYPE_INFO, "Invalid hunting group selection!");
+        ChatPacket(CHAT_TYPE_INFO, LC_TEXT("IDLE_HUNT_INVALID_GROUP"));
         sys_err("Idle Hunting: Player %u tried to hunt invalid group %u", GetPlayerID(), groupId);
         return;
     }
 
     if (GetLevel() < group->min_level)
     {
-        ChatPacket(CHAT_TYPE_INFO, "You need level %d to hunt this group!", group->min_level);
+        ChatPacket(CHAT_TYPE_INFO, LC_TEXT("IDLE_HUNT_LEVEL_TOO_LOW"), group->min_level);
         return;
     }
 
     // Check premium requirement
     if (group->premium_only && !IsGM())  // Replace with proper premium check when available
     {
-        ChatPacket(CHAT_TYPE_INFO, "This hunting group requires premium status!");
+        ChatPacket(CHAT_TYPE_INFO, LC_TEXT("IDLE_HUNT_PREMIUM_REQUIRED"));
         return;
     }
     
@@ -118,11 +137,11 @@ void CHARACTER::StartIdleHunting(DWORD groupId)
     {
         sys_log(0, "IDLE_HUNT: Hunt already configured (group=%u, is_active=%d), returning", m_idleHunting.groupId, m_idleHunting.isActive);
         if (m_idleHunting.isActive == 0)
-            ChatPacket(CHAT_TYPE_INFO, "You already configured a hunt. Log out to start, or cancel it first!");
+            ChatPacket(CHAT_TYPE_INFO, LC_TEXT("IDLE_HUNT_ALREADY_CONFIGURED"));
         else if (m_idleHunting.isActive == 1)
-            ChatPacket(CHAT_TYPE_INFO, "Idle hunting is already in progress!");
+            ChatPacket(CHAT_TYPE_INFO, LC_TEXT("IDLE_HUNT_ALREADY_ACTIVE"));
         else if (m_idleHunting.isActive == 2)
-            ChatPacket(CHAT_TYPE_INFO, "You have unclaimed rewards! Claim them first before starting a new hunt.");
+            ChatPacket(CHAT_TYPE_INFO, LC_TEXT("IDLE_HUNT_CLAIM_FIRST"));
         return;
     }
 
@@ -132,7 +151,7 @@ void CHARACTER::StartIdleHunting(DWORD groupId)
     if (!timeinfo)
     {
         sys_err("localtime failed for player %u", GetPlayerID());
-        ChatPacket(CHAT_TYPE_INFO, "System error - please try again.");
+        ChatPacket(CHAT_TYPE_INFO, LC_TEXT("IDLE_HUNT_SYSTEM_ERROR"));
         return;
     }
     
@@ -148,7 +167,7 @@ void CHARACTER::StartIdleHunting(DWORD groupId)
     if (m_idleHunting.totalTimeToday >= m_idleHunting.maxDailySeconds)
     {
         int maxHours = m_idleHunting.maxDailySeconds / 3600;
-        ChatPacket(CHAT_TYPE_INFO, "You've reached the %d-hour daily limit!", maxHours);
+        ChatPacket(CHAT_TYPE_INFO, LC_TEXT("IDLE_HUNT_DAILY_LIMIT_REACHED"), maxHours);
         return;
     }
 
@@ -167,7 +186,7 @@ void CHARACTER::StartIdleHunting(DWORD groupId)
     SaveIdleHunting();
     sys_log(0, "IDLE_HUNT: SaveIdleHunting completed for player %u", GetPlayerID());
     
-    ChatPacket(CHAT_TYPE_INFO, "Idle hunt configured for '%s'. Log out to start hunting!", group->name.c_str());
+    ChatPacket(CHAT_TYPE_INFO, LC_TEXT("IDLE_HUNT_CONFIGURED"), group->display_name.c_str());
     
     char szHint[128];
     snprintf(szHint, sizeof(szHint), "group_id %u level %d (pending)", groupId, group->min_level);
@@ -188,7 +207,7 @@ void CHARACTER::StopIdleHunting()
     m_idleHunting.startTime = 0;
     m_idleHunting.endTime = 0;
     m_idleHunting.lastClaimTime = 0;
-    ChatPacket(CHAT_TYPE_INFO, "Idle hunting has been cancelled.");
+    ChatPacket(CHAT_TYPE_INFO, LC_TEXT("IDLE_HUNT_CANCELLED"));
     
     SaveIdleHunting();
 }
@@ -198,7 +217,7 @@ void CHARACTER::CalculateIdleRewards()
     // Only calculate rewards if in "ready to claim" state (2)
     if (m_idleHunting.isActive != 2)
     {
-        ChatPacket(CHAT_TYPE_INFO, "No idle hunt rewards to claim!");
+        ChatPacket(CHAT_TYPE_INFO, LC_TEXT("IDLE_HUNT_NO_REWARDS"));
         return;
     }
 
@@ -249,7 +268,7 @@ void CHARACTER::CalculateIdleRewards()
     if (remainingTime <= 0)
     {
         int maxHours = m_idleHunting.maxDailySeconds / 3600;
-        ChatPacket(CHAT_TYPE_INFO, "You've reached the %d-hour daily limit for idle hunting!", maxHours);
+        ChatPacket(CHAT_TYPE_INFO, LC_TEXT("IDLE_HUNT_DAILY_LIMIT_HIT"), maxHours);
         StopIdleHunting();
         return;
     }
@@ -259,7 +278,7 @@ void CHARACTER::CalculateIdleRewards()
     {
         elapsedSeconds = remainingTime;
         int maxHours = m_idleHunting.maxDailySeconds / 3600;
-        ChatPacket(CHAT_TYPE_INFO, "Daily %d-hour limit reached! Collecting partial rewards.", maxHours);
+        ChatPacket(CHAT_TYPE_INFO, LC_TEXT("IDLE_HUNT_DAILY_LIMIT_PARTIAL"), maxHours);
     }
     
     // Update daily time counter
@@ -422,7 +441,7 @@ void CHARACTER::CalculateIdleRewards()
     if (totalGold > 0)
     {
         PointChange(POINT_GOLD, totalGold);
-        ChatPacket(CHAT_TYPE_INFO, "Earned %u yang from idle hunting!", totalGold);
+        ChatPacket(CHAT_TYPE_INFO, LC_TEXT("IDLE_HUNT_YANG_EARNED"), totalGold);
         
         char szYangHint[128];
         snprintf(szYangHint, sizeof(szYangHint), "yang_earned %u kills %d group %u", totalGold, totalKillsInt, m_idleHunting.groupId);
@@ -444,12 +463,12 @@ void CHARACTER::CalculateIdleRewards()
     int remainingHours = (m_idleHunting.maxDailySeconds - m_idleHunting.totalTimeToday) / 3600;
     int remainingMinutes = ((m_idleHunting.maxDailySeconds - m_idleHunting.totalTimeToday) % 3600) / 60;
 
-    ChatPacket(CHAT_TYPE_INFO, "=== Idle Hunting Results ===");
-    ChatPacket(CHAT_TYPE_INFO, "Group: %s", group->name.c_str());
-    ChatPacket(CHAT_TYPE_INFO, "Time hunted: %dh %dm", hours, minutes);
-    ChatPacket(CHAT_TYPE_INFO, "Killed: %d mobs", totalKillsInt);
-    ChatPacket(CHAT_TYPE_INFO, "Gained: %llu experience", totalExp);
-    ChatPacket(CHAT_TYPE_INFO, "Daily time remaining: %dh %dm", remainingHours, remainingMinutes);
+    ChatPacket(CHAT_TYPE_INFO, LC_TEXT("IDLE_HUNT_RESULTS_HEADER"));
+    ChatPacket(CHAT_TYPE_INFO, LC_TEXT("IDLE_HUNT_RESULTS_GROUP"), group->name.c_str());
+    ChatPacket(CHAT_TYPE_INFO, LC_TEXT("IDLE_HUNT_RESULTS_TIME"), hours, minutes);
+    ChatPacket(CHAT_TYPE_INFO, LC_TEXT("IDLE_HUNT_RESULTS_KILLS"), totalKillsInt);
+    ChatPacket(CHAT_TYPE_INFO, LC_TEXT("IDLE_HUNT_RESULTS_EXP"), totalExp);
+    ChatPacket(CHAT_TYPE_INFO, LC_TEXT("IDLE_HUNT_DAILY_REMAINING"), remainingHours, remainingMinutes);
 
     // Update last claim time
     m_idleHunting.lastClaimTime = currentTime;
@@ -505,7 +524,7 @@ void CHARACTER::GenerateIdleHuntingDrops(DWORD groupId, int killCount)
             LPITEM item = AutoGiveItem(itemVnum, giveCount);
             if (item)
             {
-                ChatPacket(CHAT_TYPE_INFO, "+ %s x%d", item->GetName(), giveCount);
+                ChatPacket(CHAT_TYPE_INFO, LC_TEXT("IDLE_HUNT_ITEM_DROP"), item->GetName(), giveCount);
                 itemsDropped++;
                 totalCount -= giveCount;
             }
