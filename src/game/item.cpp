@@ -12,7 +12,6 @@
 #include "profiler.h"
 #include "marriage.h"
 #include "item_addon.h"
-#include "dev_log.h"
 #include "locale_service.h"
 #include "item.h"
 #include "item_manager.h"
@@ -1437,6 +1436,18 @@ EVENTFUNC(real_time_expire_event)
 
 	if (current > item->GetSocket(0))
 	{
+	LPCHARACTER owner = item->GetOwner();
+	//##########################################
+		if (owner && owner->GetDesc())
+		{
+			LPDESC d = owner->GetDesc();
+			
+			if (d->IsPhase(PHASE_LOADING))
+			{								
+				return PASSES_PER_SEC(1);	
+			}								
+		}									
+	//##########################################
 		switch (item->GetVnum())
 		{
 			if(item->IsNewMountItem())
